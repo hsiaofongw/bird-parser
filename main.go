@@ -177,12 +177,12 @@ func parseBGPProtoBasics(line string) *BGPProtoBasics {
 		}
 		cells = append(cells, c)
 	}
-	if len(cells) > 5 {
+
+	if len(cells) > 6 {
 		cells[4] = cells[4] + " " + cells[5]
-		if len(cells) > 6 {
-			cells[5] = cells[6]
-		}
+		cells[5] = cells[6]
 	}
+
 	if len(cells) > 0 {
 		result.Name = cells[0]
 	}
