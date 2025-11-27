@@ -31,10 +31,11 @@ func SplitBy(seq []byte) bufio.SplitFunc {
 }
 
 type Line struct {
-	LineIdx      int          `json:"line_idx"`
-	LineGroupIdx int          `json:"line_group_idx"`
-	Raw          string       `json:"raw"`
-	Metadata     LineMetadata `json:"metadata"`
+	LineIdx      int           `json:"line_idx"`
+	LineGroupIdx int           `json:"line_group_idx"`
+	Raw          string        `json:"raw"`
+	Metadata     LineMetadata  `json:"metadata"`
+	Meaning      *ReplyMeaning `json:"meaning"`
 }
 
 func (l *Line) Content() string {
@@ -62,7 +63,8 @@ type ReplyMeaning string
 
 const (
 	ReplySuccess      ReplyMeaning = "success"
-	ReplyTableEntries ReplyMeaning = "table_entries"
+	ReplyTableHeader  ReplyMeaning = "table_header"
+	ReplyTableEntries ReplyMeaning = "table_entry"
 	ReplyRuntimeError ReplyMeaning = "runtime_error"
 	ReplySyntaxError  ReplyMeaning = "syntax_error"
 )
@@ -77,26 +79,28 @@ func (r *ReplyMeaning) String() string {
 func ReplyMeaningFromCode(code string) (replyMeaning *ReplyMeaning) {
 	replyMeaning = new(ReplyMeaning)
 	if len(code) > 0 {
-		switch code[0] {
-		case '0':
+		switch code[0:1] {
+		case "0":
 			*replyMeaning = ReplySuccess
-		case '1':
+		case "2":
+			*replyMeaning = ReplyTableHeader
+		case "1":
 			*replyMeaning = ReplyTableEntries
-		case '8':
+		case "8":
 			*replyMeaning = ReplyRuntimeError
-		case '9':
+		case "9":
 			*replyMeaning = ReplySyntaxError
+		default:
+			return nil
 		}
+		return replyMeaning
 	}
 	return nil
 }
 
 type Block struct {
-	BlockIndex int           `json:"block_index"`
-	InitCode   string        `json:"code"`
-	EndCode    string        `json:"end_code"`
-	Lines      []Line        `json:"lines"`
-	Meaning    *ReplyMeaning `json:"meaning"`
+	BlockIndex int    `json:"block_index"`
+	Lines      []Line `json:"lines"`
 }
 
 func (b *Block) Content() string {
@@ -157,21 +161,18 @@ func main() {
 			line := scanner.Text()
 			lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
 			lineObj.Metadata = testForGroupSep(line)
+			lineObj.Meaning = ReplyMeaningFromCode(lineObj.Metadata.Code)
 			msgs.Lines = append(msgs.Lines, lineObj)
 			if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
-				code1 := msgs.Lines[numLinesRead].Metadata.Code
-				code2 := lineObj.Metadata.Code
 				blockObj := Block{
 					BlockIndex: len(msgs.Blocks),
-					InitCode:   code1,
-					EndCode:    code2,
 					Lines:      msgs.Lines[numLinesRead:],
-					Meaning:    ReplyMeaningFromCode(code1),
 				}
 				msgs.Blocks = append(msgs.Blocks, blockObj)
 				if err := encoder.Encode(blockObj); err != nil {
 					log.Fatalf("failed to encode line: %v", err)
 				}
+				numLinesRead = len(msgs.Lines)
 			}
 		}
 	}()
