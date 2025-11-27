@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -544,16 +545,57 @@ func (parser *BirdBGPProtoInfoParser) Parse() *BGPProtoInfo {
 	return nil
 }
 
+type BirdClient struct {
+	conn      net.Conn
+	onConnect func(ctx context.Context) error
+}
+
+func NewBirdClientFromSocket(socketPath string) *BirdClient {
+	client := new(BirdClient)
+
+	onConnect := func(ctx context.Context) error {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			return fmt.Errorf("failed to connect to socket: %v", err)
+		}
+		client.conn = conn
+		return nil
+	}
+	client.onConnect = onConnect
+
+	return client
+}
+
+func (client *BirdClient) Connect(ctx context.Context) error {
+	return client.onConnect(ctx)
+}
+
+func (client *BirdClient) Close() error {
+	return client.conn.Close()
+}
+
+func (client *BirdClient) SendCommand(ctx context.Context, command string) error {
+	_, err := fmt.Fprintf(client.conn, "%s\n", command)
+	return err
+}
+
+func (client *BirdClient) GetConnection() net.Conn {
+	return client.conn
+}
+
 func main() {
 	if *socketPath == "" {
 		log.Fatalf("socket path is not set")
 	}
 
-	conn, err := net.Dial("unix", *socketPath)
-	if err != nil {
-		log.Fatalf("failed to connect to socket: %v", err)
+	birdClient := NewBirdClientFromSocket(*socketPath)
+
+	if err := birdClient.Connect(context.Background()); err != nil {
+		log.Fatalf("failed to connect to bird: %v", err)
 	}
-	defer conn.Close()
+	defer birdClient.Close()
+
+	conn := birdClient.GetConnection()
 
 	go func() {
 		parser := NewBirdBGPProtoInfoParser(conn)
@@ -563,7 +605,7 @@ func main() {
 		}
 	}()
 
-	fmt.Fprintf(conn, "show protocols all bgp2\n")
+	birdClient.SendCommand(context.TODO(), "show protocols all bgp2")
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
