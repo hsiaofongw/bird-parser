@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -37,10 +38,8 @@ type Line struct {
 	Metadata     LineMetadata  `json:"metadata"`
 	Meaning      *ReplyMeaning `json:"meaning"`
 	Indent       int           `json:"indent"`
-}
-
-func (l *Line) Content() string {
-	return l.Raw[l.Metadata.ContentOffset:]
+	Content      string        `json:"content"`
+	TrimmedLine  string        `json:"trimmed_line"`
 }
 
 const maxTokenSize = 1024 * 1024
@@ -104,10 +103,228 @@ type Block struct {
 	Lines      []Line `json:"lines"`
 }
 
+type ChannelRoutesStat struct {
+	Imported  int `json:"imported"`
+	Filtered  int `json:"filtered"`
+	Exported  int `json:"exported"`
+	Preferred int `json:"preferred"`
+}
+
+type ChannelRouteChangesStatEntry struct {
+	Received *int `json:"received,omitempty"`
+	Rejected *int `json:"rejected,omitempty"`
+	Filtered *int `json:"filtered,omitempty"`
+	Ignored  *int `json:"ignored,omitempty"`
+	Accepted *int `json:"accepted,omitempty"`
+}
+
+type ChannelRouteChangesStat struct {
+	ImportUpdates   *ChannelRouteChangesStatEntry `json:"import_updates,omitempty"`
+	ImportWithdraws *ChannelRouteChangesStatEntry `json:"import_withdraws,omitempty"`
+	ExportUpdates   *ChannelRouteChangesStatEntry `json:"export_updates,omitempty"`
+	ExportWithdraws *ChannelRouteChangesStatEntry `json:"export_withdraws,omitempty"`
+}
+
+type BGPProtoInfo struct {
+	Channels map[string]ChannelInfo `json:"channels"`
+}
+
+func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
+	result := new(BGPProtoInfo)
+	result.Channels = make(map[string]ChannelInfo)
+	if lineIdx := findLineIdx(lines, `^Channel ipv6`); lineIdx >= 0 {
+		channelInfo := parseChannel(lines[lineIdx:])
+		if channelInfo != nil {
+			result.Channels[channelInfo.Name] = *channelInfo
+		}
+	}
+	if lineIdx := findLineIdx(lines, `^Channel ipv4`); lineIdx >= 0 {
+		channelInfo := parseChannel(lines[lineIdx:])
+		if channelInfo != nil {
+			result.Channels[channelInfo.Name] = *channelInfo
+		}
+	}
+	return result
+}
+
+type ChannelInfo struct {
+	Name             string                   `json:"name"`
+	State            string                   `json:"state"`
+	Preference       *int                     `json:"preference,omitempty"`
+	InputFilter      string                   `json:"input_filter"`
+	OutputFilter     string                   `json:"output_filter"`
+	RoutesStat       *ChannelRoutesStat       `json:"routes_stat,omitempty"`
+	RouteChangesStat *ChannelRouteChangesStat `json:"route_changes_stat,omitempty"`
+	BGPNextHop       *string                  `json:"bgp_next_hop,omitempty"`
+}
+
+func parseRouteStats(line string) *ChannelRoutesStat {
+	result := new(ChannelRoutesStat)
+	numMatches := 0
+
+	importedPattern := regexp.MustCompile(`(\d+)\s+imported`)
+	if matches := importedPattern.FindStringSubmatch(line); matches != nil {
+		imported, err := strconv.Atoi(matches[1])
+		if err == nil {
+			result.Imported = imported
+			numMatches++
+		}
+	}
+
+	filteredPattern := regexp.MustCompile(`(\d+)\s+filtered`)
+	if matches := filteredPattern.FindStringSubmatch(line); matches != nil {
+		filtered, err := strconv.Atoi(matches[1])
+		if err == nil {
+			result.Filtered = filtered
+			numMatches++
+		}
+	}
+
+	exportedPattern := regexp.MustCompile(`(\d+)\s+exported`)
+	if matches := exportedPattern.FindStringSubmatch(line); matches != nil {
+		exported, err := strconv.Atoi(matches[1])
+		if err == nil {
+			result.Exported = exported
+			numMatches++
+		}
+	}
+
+	preferredPattern := regexp.MustCompile(`(\d+)\s+preferred`)
+	if matches := preferredPattern.FindStringSubmatch(line); matches != nil {
+		preferred, err := strconv.Atoi(matches[1])
+		if err == nil {
+			result.Preferred = preferred
+			numMatches++
+		}
+	}
+
+	if numMatches == 0 {
+		return nil
+	}
+
+	return result
+}
+
+func parseNums(line string) []*int {
+	segs := strings.Split(line, " ")
+	result := make([]*int, 0)
+	for _, seg := range segs {
+		word := strings.TrimSpace(seg)
+		if x, err := strconv.Atoi(word); err == nil {
+			result = append(result, &x)
+		} else {
+			result = append(result, nil)
+		}
+	}
+	return result
+}
+
+func parseRouteChangesStatEntry(importUpdatesLine string) *ChannelRouteChangesStatEntry {
+	nums := parseNums(importUpdatesLine)
+	if len(nums) == 0 {
+		return nil
+	}
+	updateStats := new(ChannelRouteChangesStatEntry)
+	if len(nums) > 0 {
+		updateStats.Received = nums[0]
+	}
+	if len(nums) > 1 {
+		updateStats.Rejected = nums[1]
+	}
+	if len(nums) > 2 {
+		updateStats.Filtered = nums[2]
+	}
+	if len(nums) > 3 {
+		updateStats.Ignored = nums[3]
+	}
+	if len(nums) > 4 {
+		updateStats.Accepted = nums[4]
+	}
+	return updateStats
+}
+
+func findLineIdx(lines []Line, pattern string) int {
+	patternObj := regexp.MustCompile(pattern)
+	for i, line := range lines {
+		if patternObj.MatchString(line.TrimmedLine) {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseChannel(lines []Line) *ChannelInfo {
+	channelInfo := new(ChannelInfo)
+
+	matchPrefix := func(prefixPattern string, line string) string {
+		pattern := regexp.MustCompile(prefixPattern)
+		matches := pattern.FindStringSubmatch(line)
+		if len(matches) > 0 {
+			match1 := matches[1]
+			return strings.TrimSpace(line[len(match1):])
+		}
+		return ""
+	}
+
+	for _, lineObj := range lines {
+		line := lineObj.TrimmedLine
+		if channelName := matchPrefix(`^Channel\s+`, line); channelName != "" {
+			channelInfo.Name = channelName
+		} else if state := matchPrefix(`^State:\s+`, line); state != "" {
+			channelInfo.State = state
+		} else if pref := matchPrefix(`^Preference:\s+`, line); pref != "" {
+			prefInt, err := strconv.Atoi(pref)
+			if err == nil {
+				channelInfo.Preference = &prefInt
+			}
+		} else if inputFilter := matchPrefix(`^Input filter:\s+`, line); inputFilter != "" {
+			channelInfo.InputFilter = inputFilter
+		} else if outputFilter := matchPrefix(`^Output filter:\s+`, line); outputFilter != "" {
+			channelInfo.OutputFilter = outputFilter
+		} else if routeStatLine := matchPrefix(`^Routes:\s+`, line); routeStatLine != "" {
+			channelInfo.RoutesStat = parseRouteStats(routeStatLine)
+		} else if routeChangesStatLine := matchPrefix(`^Route changes:\s+`, line); routeChangesStatLine != "" {
+			continue
+		} else if importUpdates := matchPrefix(`^Import updates:\s+`, line); importUpdates != "" {
+			if entry := parseRouteChangesStatEntry(importUpdates); entry != nil {
+				if channelInfo.RouteChangesStat == nil {
+					channelInfo.RouteChangesStat = new(ChannelRouteChangesStat)
+				}
+				channelInfo.RouteChangesStat.ImportUpdates = entry
+			}
+		} else if importWithdraws := matchPrefix(`^Import withdraws:\s+`, line); importWithdraws != "" {
+			if entry := parseRouteChangesStatEntry(importWithdraws); entry != nil {
+				if channelInfo.RouteChangesStat == nil {
+					channelInfo.RouteChangesStat = new(ChannelRouteChangesStat)
+				}
+				channelInfo.RouteChangesStat.ImportWithdraws = entry
+			}
+		} else if exportUpdates := matchPrefix(`^Export updates:\s+`, line); exportUpdates != "" {
+			if entry := parseRouteChangesStatEntry(exportUpdates); entry != nil {
+				if channelInfo.RouteChangesStat == nil {
+					channelInfo.RouteChangesStat = new(ChannelRouteChangesStat)
+				}
+				channelInfo.RouteChangesStat.ExportUpdates = entry
+			}
+		} else if exportWithdraws := matchPrefix(`^Export withdraws:\s+`, line); exportWithdraws != "" {
+			if entry := parseRouteChangesStatEntry(exportWithdraws); entry != nil {
+				if channelInfo.RouteChangesStat == nil {
+					channelInfo.RouteChangesStat = new(ChannelRouteChangesStat)
+				}
+				channelInfo.RouteChangesStat.ExportWithdraws = entry
+			}
+		} else if bgpNextHop := matchPrefix(`^BGP Next hop:\s+`, line); bgpNextHop != "" {
+			channelInfo.BGPNextHop = &bgpNextHop
+		}
+	}
+
+	return channelInfo
+}
+
 func (b *Block) Content() string {
 	lines := make([]string, 0)
 	for _, line := range b.Lines {
-		lines = append(lines, line.Content())
+		lines = append(lines, line.Content)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -172,7 +389,9 @@ func main() {
 			lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
 			lineObj.Metadata = testForGroupSep(line)
 			lineObj.Meaning = ReplyMeaningFromCode(lineObj.Metadata.Code)
-			lineObj.Indent = countIndent(lineObj.Content())
+			lineObj.Content = lineObj.Raw[lineObj.Metadata.ContentOffset:]
+			lineObj.Indent = countIndent(lineObj.Content)
+			lineObj.TrimmedLine = strings.TrimSpace(lineObj.Content)
 			msgs.Lines = append(msgs.Lines, lineObj)
 			if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
 				blockObj := Block{
@@ -184,6 +403,13 @@ func main() {
 					log.Fatalf("failed to encode line: %v", err)
 				}
 				numLinesRead = len(msgs.Lines)
+
+				protoInfo := parseBGPProtoInfo(msgs.Lines[numLinesRead:])
+				if protoInfo != nil {
+					if err := encoder.Encode(protoInfo); err != nil {
+						log.Fatalf("failed to encode proto info: %v", err)
+					}
+				}
 			}
 		}
 	}()
