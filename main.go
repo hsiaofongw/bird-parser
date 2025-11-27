@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -205,76 +207,78 @@ func parseBGPProtoBasics(line string) *BGPProtoBasics {
 }
 
 func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
-	result := new(BGPProtoInfo)
-	result.Channels = make(map[string]ChannelInfo)
-
 	summaryTabPattern := regexp.MustCompile(`Name\s+Proto\s+Table\s+State\s+Since\s+Info`)
 	if summaryTabPattern.MatchString(lines[0].TrimmedLine) && len(lines) > 1 {
+		result := new(BGPProtoInfo)
+		result.Channels = make(map[string]ChannelInfo)
+
 		basics := parseBGPProtoBasics(lines[1].TrimmedLine)
 		if basics != nil {
 			result.Basics = basics
 		}
+
+		for _, line := range lines {
+			if v := matchPrefix(`^VRF:\s+`, line.TrimmedLine); v != "" {
+				result.VRF = &v
+			}
+			if v := matchPrefix(`^BGP state:\s+`, line.TrimmedLine); v != "" {
+				result.BGPState = &v
+			}
+			if v := matchPrefix(`^Neighbor address:\s+`, line.TrimmedLine); v != "" {
+				result.NeighborAddress = &v
+			}
+			if v := matchPrefix(`^Neighbor AS:\s+`, line.TrimmedLine); v != "" {
+				result.NeighborAS = &v
+			}
+			if v := matchPrefix(`^Local AS:\s+`, line.TrimmedLine); v != "" {
+				result.LocalAS = &v
+			}
+			if v := matchPrefix(`^Neighbor ID:\s+`, line.TrimmedLine); v != "" {
+				result.NeighborID = &v
+			}
+			if v := matchPrefix(`^Session:\s+`, line.TrimmedLine); v != "" {
+				result.Session = &v
+			}
+			if v := matchPrefix(`^Source address:\s+`, line.TrimmedLine); v != "" {
+				result.SourceAddress = &v
+			}
+			if v := matchPrefix(`^Hold timer:\s+`, line.TrimmedLine); v != "" {
+				result.HoldTimer = &v
+			}
+			if v := matchPrefix(`^Keepalive timer:\s+`, line.TrimmedLine); v != "" {
+				result.KeepaliveTimer = &v
+			}
+			if v := matchPrefix(`^Send hold timer:\s+`, line.TrimmedLine); v != "" {
+				result.SendHoldTimer = &v
+			}
+		}
+
+		if lineIdx := findLineIdx(lines, `^Local capabilities`); lineIdx >= 0 {
+			localCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
+			result.LocalCapabilities = localCapabilities
+		}
+		if lineIdx := findLineIdx(lines, `^Neighbor capabilities`); lineIdx >= 0 {
+			neighborCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
+			result.NeighborCapabilities = neighborCapabilities
+		}
+
+		if lineIdx := findLineIdx(lines, `^Channel ipv6`); lineIdx >= 0 {
+			channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
+			if channelInfo != nil {
+				result.Channels[channelInfo.Name] = *channelInfo
+			}
+		}
+		if lineIdx := findLineIdx(lines, `^Channel ipv4`); lineIdx >= 0 {
+			channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
+			if channelInfo != nil {
+				result.Channels[channelInfo.Name] = *channelInfo
+			}
+		}
+
+		return result
 	}
 
-	for _, line := range lines {
-		if v := matchPrefix(`^VRF:\s+`, line.TrimmedLine); v != "" {
-			result.VRF = &v
-		}
-		if v := matchPrefix(`^BGP state:\s+`, line.TrimmedLine); v != "" {
-			result.BGPState = &v
-		}
-		if v := matchPrefix(`^Neighbor address:\s+`, line.TrimmedLine); v != "" {
-			result.NeighborAddress = &v
-		}
-		if v := matchPrefix(`^Neighbor AS:\s+`, line.TrimmedLine); v != "" {
-			result.NeighborAS = &v
-		}
-		if v := matchPrefix(`^Local AS:\s+`, line.TrimmedLine); v != "" {
-			result.LocalAS = &v
-		}
-		if v := matchPrefix(`^Neighbor ID:\s+`, line.TrimmedLine); v != "" {
-			result.NeighborID = &v
-		}
-		if v := matchPrefix(`^Session:\s+`, line.TrimmedLine); v != "" {
-			result.Session = &v
-		}
-		if v := matchPrefix(`^Source address:\s+`, line.TrimmedLine); v != "" {
-			result.SourceAddress = &v
-		}
-		if v := matchPrefix(`^Hold timer:\s+`, line.TrimmedLine); v != "" {
-			result.HoldTimer = &v
-		}
-		if v := matchPrefix(`^Keepalive timer:\s+`, line.TrimmedLine); v != "" {
-			result.KeepaliveTimer = &v
-		}
-		if v := matchPrefix(`^Send hold timer:\s+`, line.TrimmedLine); v != "" {
-			result.SendHoldTimer = &v
-		}
-	}
-
-	if lineIdx := findLineIdx(lines, `^Local capabilities`); lineIdx >= 0 {
-		localCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
-		result.LocalCapabilities = localCapabilities
-	}
-	if lineIdx := findLineIdx(lines, `^Neighbor capabilities`); lineIdx >= 0 {
-		neighborCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
-		result.NeighborCapabilities = neighborCapabilities
-	}
-
-	if lineIdx := findLineIdx(lines, `^Channel ipv6`); lineIdx >= 0 {
-		channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
-		if channelInfo != nil {
-			result.Channels[channelInfo.Name] = *channelInfo
-		}
-	}
-	if lineIdx := findLineIdx(lines, `^Channel ipv4`); lineIdx >= 0 {
-		channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
-		if channelInfo != nil {
-			result.Channels[channelInfo.Name] = *channelInfo
-		}
-	}
-
-	return result
+	return nil
 }
 
 func parseRouteStats(line string) *ChannelRoutesStat {
@@ -495,6 +499,51 @@ func countIndent(line string) int {
 	return 0
 }
 
+type BirdBGPProtoInfoParser struct {
+	reader io.Reader
+}
+
+func NewBirdBGPProtoInfoParser(reader io.Reader) *BirdBGPProtoInfoParser {
+	return &BirdBGPProtoInfoParser{
+		reader: reader,
+	}
+}
+
+func (parser *BirdBGPProtoInfoParser) Parse() *BGPProtoInfo {
+	msgs := new(RawMessages)
+	msgs.Lines = make([]Line, 0)
+	numLinesRead := 0
+
+	scanner := bufio.NewScanner(parser.reader)
+	scanBuf := make([]byte, maxTokenSize)
+	scanner.Buffer(scanBuf, maxTokenSize)
+	scanner.Split(SplitBy([]byte{'\n'}))
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
+		lineObj.Metadata = testForGroupSep(line)
+		lineObj.Meaning = ReplyMeaningFromCode(lineObj.Metadata.Code)
+		lineObj.Content = lineObj.Raw[lineObj.Metadata.ContentOffset:]
+		lineObj.Indent = countIndent(lineObj.Content)
+		lineObj.TrimmedLine = strings.TrimSpace(lineObj.Content)
+		msgs.Lines = append(msgs.Lines, lineObj)
+		if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
+			blockObj := Block{
+				BlockIndex: len(msgs.Blocks),
+				Lines:      msgs.Lines[numLinesRead:],
+			}
+			msgs.Blocks = append(msgs.Blocks, blockObj)
+			numLinesRead = len(msgs.Lines)
+
+			protoInfo := parseBGPProtoInfo(blockObj.Lines)
+			if protoInfo != nil {
+				return protoInfo
+			}
+		}
+	}
+	return nil
+}
+
 func main() {
 	if *socketPath == "" {
 		log.Fatalf("socket path is not set")
@@ -506,53 +555,15 @@ func main() {
 	}
 	defer conn.Close()
 
-	msgs := new(RawMessages)
-	msgs.Lines = make([]Line, 0)
-
 	go func() {
-
-		numLinesRead := 0
-
-		encoder := json.NewEncoder(os.Stdout)
-		scanner := bufio.NewScanner(conn)
-		scanBuf := make([]byte, maxTokenSize)
-		scanner.Buffer(scanBuf, maxTokenSize)
-		scanner.Split(SplitBy([]byte{'\n'}))
-		for scanner.Scan() {
-			line := scanner.Text()
-			lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
-			lineObj.Metadata = testForGroupSep(line)
-			lineObj.Meaning = ReplyMeaningFromCode(lineObj.Metadata.Code)
-			lineObj.Content = lineObj.Raw[lineObj.Metadata.ContentOffset:]
-			lineObj.Indent = countIndent(lineObj.Content)
-			lineObj.TrimmedLine = strings.TrimSpace(lineObj.Content)
-			msgs.Lines = append(msgs.Lines, lineObj)
-			if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
-				blockObj := Block{
-					BlockIndex: len(msgs.Blocks),
-					Lines:      msgs.Lines[numLinesRead:],
-				}
-				msgs.Blocks = append(msgs.Blocks, blockObj)
-				numLinesRead = len(msgs.Lines)
-
-				protoInfo := parseBGPProtoInfo(blockObj.Lines)
-				if protoInfo != nil {
-					if err := encoder.Encode(protoInfo); err != nil {
-						log.Fatalf("failed to encode proto info: %v", err)
-					}
-				}
-			}
+		parser := NewBirdBGPProtoInfoParser(conn)
+		protoInfo := parser.Parse()
+		if protoInfo != nil {
+			json.NewEncoder(os.Stdout).Encode(protoInfo)
 		}
 	}()
 
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Split(bufio.ScanLines)
-		for scanner.Scan() {
-			line := scanner.Text()
-			conn.Write([]byte(line + "\n"))
-		}
-	}()
+	fmt.Fprintf(conn, "show protocols all bgp2\n")
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
