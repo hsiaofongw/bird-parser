@@ -133,13 +133,13 @@ func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
 	result := new(BGPProtoInfo)
 	result.Channels = make(map[string]ChannelInfo)
 	if lineIdx := findLineIdx(lines, `^Channel ipv6`); lineIdx >= 0 {
-		channelInfo := parseChannel(lines[lineIdx:])
+		channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
 		if channelInfo != nil {
 			result.Channels[channelInfo.Name] = *channelInfo
 		}
 	}
 	if lineIdx := findLineIdx(lines, `^Channel ipv4`); lineIdx >= 0 {
-		channelInfo := parseChannel(lines[lineIdx:])
+		channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
 		if channelInfo != nil {
 			result.Channels[channelInfo.Name] = *channelInfo
 		}
@@ -210,6 +210,9 @@ func parseNums(line string) []*int {
 	result := make([]*int, 0)
 	for _, seg := range segs {
 		word := strings.TrimSpace(seg)
+		if word == "" {
+			continue
+		}
 		if x, err := strconv.Atoi(word); err == nil {
 			result = append(result, &x)
 		} else {
@@ -253,18 +256,18 @@ func findLineIdx(lines []Line, pattern string) int {
 	return -1
 }
 
+func matchPrefix(prefixPattern string, line string) string {
+	pattern := regexp.MustCompile(prefixPattern)
+	matches := pattern.FindStringSubmatch(line)
+	if len(matches) > 0 {
+		match0 := matches[0]
+		return strings.TrimSpace(line[len(match0):])
+	}
+	return ""
+}
+
 func parseChannel(lines []Line) *ChannelInfo {
 	channelInfo := new(ChannelInfo)
-
-	matchPrefix := func(prefixPattern string, line string) string {
-		pattern := regexp.MustCompile(prefixPattern)
-		matches := pattern.FindStringSubmatch(line)
-		if len(matches) > 0 {
-			match1 := matches[1]
-			return strings.TrimSpace(line[len(match1):])
-		}
-		return ""
-	}
 
 	for _, lineObj := range lines {
 		line := lineObj.TrimmedLine
@@ -399,12 +402,9 @@ func main() {
 					Lines:      msgs.Lines[numLinesRead:],
 				}
 				msgs.Blocks = append(msgs.Blocks, blockObj)
-				if err := encoder.Encode(blockObj); err != nil {
-					log.Fatalf("failed to encode line: %v", err)
-				}
 				numLinesRead = len(msgs.Lines)
 
-				protoInfo := parseBGPProtoInfo(msgs.Lines[numLinesRead:])
+				protoInfo := parseBGPProtoInfo(blockObj.Lines)
 				if protoInfo != nil {
 					if err := encoder.Encode(protoInfo); err != nil {
 						log.Fatalf("failed to encode proto info: %v", err)
