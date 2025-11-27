@@ -36,6 +36,7 @@ type Line struct {
 	Raw          string        `json:"raw"`
 	Metadata     LineMetadata  `json:"metadata"`
 	Meaning      *ReplyMeaning `json:"meaning"`
+	Indent       int           `json:"indent"`
 }
 
 func (l *Line) Content() string {
@@ -134,6 +135,15 @@ func testForGroupSep(line string) LineMetadata {
 	return meta
 }
 
+func countIndent(line string) int {
+	pattern := regexp.MustCompile(`^\s*`)
+	matches := pattern.FindStringSubmatch(line)
+	if len(matches) > 0 {
+		return len(matches[0])
+	}
+	return 0
+}
+
 func main() {
 	if *socketPath == "" {
 		log.Fatalf("socket path is not set")
@@ -162,6 +172,7 @@ func main() {
 			lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
 			lineObj.Metadata = testForGroupSep(line)
 			lineObj.Meaning = ReplyMeaningFromCode(lineObj.Metadata.Code)
+			lineObj.Indent = countIndent(lineObj.Content())
 			msgs.Lines = append(msgs.Lines, lineObj)
 			if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
 				blockObj := Block{
