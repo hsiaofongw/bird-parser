@@ -11,11 +11,10 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
+	"time"
 )
 
 func SplitBy(seq []byte) bufio.SplitFunc {
@@ -48,6 +47,7 @@ type Line struct {
 const maxTokenSize = 1024 * 1024
 
 var socketPath = flag.String("socket", "/var/run/bird/bird.ctl", "path to the socket file")
+var bgpProtocolName = flag.String("protocol", "", "name of the BGP protocol to show")
 
 type RawMessages struct {
 	Lines  []Line  `json:"lines"`
@@ -583,9 +583,41 @@ func (client *BirdClient) GetConnection() net.Conn {
 	return client.conn
 }
 
+func (client *BirdClient) ShowBGPProtocolInfo(ctx context.Context, protocolName string) (*BGPProtoInfo, error) {
+	if protocolName == "" {
+		return nil, fmt.Errorf("invalid or empty protocol name, protocol name is required")
+	}
+
+	protoInfoChan := make(chan *BGPProtoInfo)
+	go func() {
+		defer close(protoInfoChan)
+
+		parser := NewBirdBGPProtoInfoParser(client.conn)
+		protoInfo := parser.Parse()
+		if protoInfo != nil {
+			protoInfoChan <- protoInfo
+			return
+		}
+		protoInfoChan <- nil
+	}()
+
+	client.SendCommand(ctx, fmt.Sprintf("show protocols all %s", protocolName))
+
+	select {
+	case protoInfo := <-protoInfoChan:
+		return protoInfo, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func main() {
 	if *socketPath == "" {
 		log.Fatalf("socket path is not set")
+	}
+
+	if *bgpProtocolName == "" {
+		log.Fatalf("BGP protocol name is not set")
 	}
 
 	birdClient := NewBirdClientFromSocket(*socketPath)
@@ -595,22 +627,15 @@ func main() {
 	}
 	defer birdClient.Close()
 
-	conn := birdClient.GetConnection()
+	ctx, cancelTimeout := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelTimeout()
 
-	go func() {
-		parser := NewBirdBGPProtoInfoParser(conn)
-		protoInfo := parser.Parse()
-		if protoInfo != nil {
-			json.NewEncoder(os.Stdout).Encode(protoInfo)
-		}
-	}()
+	protoInfo, err := birdClient.ShowBGPProtocolInfo(ctx, *bgpProtocolName)
+	if err != nil {
+		log.Fatalf("failed to show BGP protocol info: %v", err)
+	}
 
-	birdClient.SendCommand(context.TODO(), "show protocols all bgp2")
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigChan
-	log.Printf("received signal %s, shutting down", sig.String())
+	json.NewEncoder(os.Stdout).Encode(protoInfo)
 }
 
 func init() {
