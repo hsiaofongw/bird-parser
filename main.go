@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
-	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 )
 
@@ -31,11 +31,14 @@ func SplitBy(seq []byte) bufio.SplitFunc {
 }
 
 type Line struct {
-	LineIdx      int    `json:"line_idx"`
-	LineGroupIdx int    `json:"line_group_idx"`
-	Content      string `json:"content"`
-	Continuation bool   `json:"continuation"`
-	EndOfReply   bool   `json:"end_of_reply"`
+	LineIdx      int          `json:"line_idx"`
+	LineGroupIdx int          `json:"line_group_idx"`
+	Raw          string       `json:"raw"`
+	Metadata     LineMetadata `json:"metadata"`
+}
+
+func (l *Line) Content() string {
+	return l.Raw[l.Metadata.ContentOffset:]
 }
 
 const maxTokenSize = 1024 * 1024
@@ -43,24 +46,88 @@ const maxTokenSize = 1024 * 1024
 var socketPath = flag.String("socket", "/var/run/bird/bird.ctl", "path to the socket file")
 
 type RawMessages struct {
-	Lines     []Line `json:"lines"`
-	NumGroups int    `json:"num_groups"`
+	Lines  []Line  `json:"lines"`
+	Blocks []Block `json:"blocks"`
 }
 
-func testForGroupSep(line string) (hasGroupSeperator bool, continuation bool, endOfReply bool) {
-	pattern1 := regexp.MustCompile(`\d{4} `)
+type LineMetadata struct {
+	HasGroupSeperator bool   `json:"has_group_seperator"`
+	Continuation      bool   `json:"continuation"`
+	EndOfReply        bool   `json:"end_of_reply"`
+	ContentOffset     int    `json:"content_offset"`
+	Code              string `json:"code"`
+}
+
+type ReplyMeaning string
+
+const (
+	ReplySuccess      ReplyMeaning = "success"
+	ReplyTableEntries ReplyMeaning = "table_entries"
+	ReplyRuntimeError ReplyMeaning = "runtime_error"
+	ReplySyntaxError  ReplyMeaning = "syntax_error"
+)
+
+func (r *ReplyMeaning) String() string {
+	if r == nil {
+		return "(unknown)"
+	}
+	return string(*r)
+}
+
+func ReplyMeaningFromCode(code string) (replyMeaning *ReplyMeaning) {
+	replyMeaning = new(ReplyMeaning)
+	if len(code) > 0 {
+		switch code[0] {
+		case '0':
+			*replyMeaning = ReplySuccess
+		case '1':
+			*replyMeaning = ReplyTableEntries
+		case '8':
+			*replyMeaning = ReplyRuntimeError
+		case '9':
+			*replyMeaning = ReplySyntaxError
+		}
+	}
+	return nil
+}
+
+type Block struct {
+	BlockIndex int           `json:"block_index"`
+	InitCode   string        `json:"code"`
+	EndCode    string        `json:"end_code"`
+	Lines      []Line        `json:"lines"`
+	Meaning    *ReplyMeaning `json:"meaning"`
+}
+
+func (b *Block) Content() string {
+	lines := make([]string, 0)
+	for _, line := range b.Lines {
+		lines = append(lines, line.Content())
+	}
+	return strings.Join(lines, "\n")
+}
+
+func testForGroupSep(line string) LineMetadata {
+	meta := LineMetadata{}
+	meta.ContentOffset = 0
+
+	pattern1 := regexp.MustCompile(`^\d{4} `)
 	if pattern1.MatchString(line) {
-		hasGroupSeperator = true
-		endOfReply = true
+		meta.HasGroupSeperator = true
+		meta.EndOfReply = true
+		meta.ContentOffset = 5
+		meta.Code = line[:4]
 	}
 
-	pattern2 := regexp.MustCompile(`\d{4}-`)
+	pattern2 := regexp.MustCompile(`^\d{4}-`)
 	if pattern2.MatchString(line) {
-		hasGroupSeperator = true
-		continuation = true
+		meta.HasGroupSeperator = true
+		meta.Continuation = true
+		meta.ContentOffset = 5
+		meta.Code = line[:4]
 	}
 
-	return
+	return meta
 }
 
 func main() {
@@ -78,29 +145,44 @@ func main() {
 	msgs.Lines = make([]Line, 0)
 
 	go func() {
+
+		numLinesRead := 0
+
 		encoder := json.NewEncoder(os.Stdout)
 		scanner := bufio.NewScanner(conn)
 		scanBuf := make([]byte, maxTokenSize)
 		scanner.Buffer(scanBuf, maxTokenSize)
-		scanner.Split(bufio.ScanLines)
+		scanner.Split(SplitBy([]byte{'\n'}))
 		for scanner.Scan() {
 			line := scanner.Text()
-			lineObj := Line{LineIdx: len(msgs.Lines), Content: line, LineGroupIdx: msgs.NumGroups}
-			nextGroup, cont, endOfRep := testForGroupSep(line)
-			if nextGroup {
-				msgs.NumGroups++
-				lineObj.Continuation = cont
-				lineObj.EndOfReply = endOfRep
-			}
-			if err := encoder.Encode(lineObj); err != nil {
-				log.Fatalf("failed to encode line: %v", err)
-			}
+			lineObj := Line{LineIdx: len(msgs.Lines), Raw: line, LineGroupIdx: len(msgs.Blocks)}
+			lineObj.Metadata = testForGroupSep(line)
 			msgs.Lines = append(msgs.Lines, lineObj)
+			if lineObj.Metadata.HasGroupSeperator && lineObj.Metadata.EndOfReply {
+				code1 := msgs.Lines[numLinesRead].Metadata.Code
+				code2 := lineObj.Metadata.Code
+				blockObj := Block{
+					BlockIndex: len(msgs.Blocks),
+					InitCode:   code1,
+					EndCode:    code2,
+					Lines:      msgs.Lines[numLinesRead:],
+					Meaning:    ReplyMeaningFromCode(code1),
+				}
+				msgs.Blocks = append(msgs.Blocks, blockObj)
+				if err := encoder.Encode(blockObj); err != nil {
+					log.Fatalf("failed to encode line: %v", err)
+				}
+			}
 		}
 	}()
 
 	go func() {
-		io.Copy(os.Stdin, conn)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Split(bufio.ScanLines)
+		for scanner.Scan() {
+			line := scanner.Text()
+			conn.Write([]byte(line + "\n"))
+		}
 	}()
 
 	sigChan := make(chan os.Signal, 1)
