@@ -148,10 +148,23 @@ type BGPProtoBasics struct {
 }
 
 type BGPProtoInfo struct {
-	Basics               *BGPProtoBasics        `json:"basics,omitempty"`
+	Basics *BGPProtoBasics `json:"basics,omitempty"`
+
+	VRF             *string `json:"vrf,omitempty"`
+	BGPState        *string `json:"bgp_state,omitempty"`
+	NeighborAddress *string `json:"neighbor_address,omitempty"`
+	NeighborAS      *string `json:"neighbor_as,omitempty"`
+	LocalAS         *string `json:"local_as,omitempty"`
+	NeighborID      *string `json:"neighbor_id,omitempty"`
+	Session         *string `json:"session,omitempty"`
+	SourceAddress   *string `json:"source_address,omitempty"`
+	HoldTimer       *string `json:"hold_timer,omitempty"`
+	KeepaliveTimer  *string `json:"keepalive_timer,omitempty"`
+	SendHoldTimer   *string `json:"send_hold_timer,omitempty"`
+
 	LocalCapabilities    BGPCapabilitiesInfo    `json:"local_capabilities,omitempty"`
 	NeighborCapabilities BGPCapabilitiesInfo    `json:"neighbor_capabilities,omitempty"`
-	Channels             map[string]ChannelInfo `json:"channels"`
+	Channels             map[string]ChannelInfo `json:"channels,omitempty"`
 }
 
 func parseBGPProtoBasics(line string) *BGPProtoBasics {
@@ -163,6 +176,12 @@ func parseBGPProtoBasics(line string) *BGPProtoBasics {
 			continue
 		}
 		cells = append(cells, c)
+	}
+	if len(cells) > 5 {
+		cells[4] = cells[4] + " " + cells[5]
+		if len(cells) > 6 {
+			cells[5] = cells[6]
+		}
 	}
 	if len(cells) > 0 {
 		result.Name = cells[0]
@@ -194,6 +213,42 @@ func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
 		basics := parseBGPProtoBasics(lines[1].TrimmedLine)
 		if basics != nil {
 			result.Basics = basics
+		}
+	}
+
+	for _, line := range lines {
+		if v := matchPrefix(`^VRF:\s+`, line.TrimmedLine); v != "" {
+			result.VRF = &v
+		}
+		if v := matchPrefix(`^BGP state:\s+`, line.TrimmedLine); v != "" {
+			result.BGPState = &v
+		}
+		if v := matchPrefix(`^Neighbor address:\s+`, line.TrimmedLine); v != "" {
+			result.NeighborAddress = &v
+		}
+		if v := matchPrefix(`^Neighbor AS:\s+`, line.TrimmedLine); v != "" {
+			result.NeighborAS = &v
+		}
+		if v := matchPrefix(`^Local AS:\s+`, line.TrimmedLine); v != "" {
+			result.LocalAS = &v
+		}
+		if v := matchPrefix(`^Neighbor ID:\s+`, line.TrimmedLine); v != "" {
+			result.NeighborID = &v
+		}
+		if v := matchPrefix(`^Session:\s+`, line.TrimmedLine); v != "" {
+			result.Session = &v
+		}
+		if v := matchPrefix(`^Source address:\s+`, line.TrimmedLine); v != "" {
+			result.SourceAddress = &v
+		}
+		if v := matchPrefix(`^Hold timer:\s+`, line.TrimmedLine); v != "" {
+			result.HoldTimer = &v
+		}
+		if v := matchPrefix(`^Keepalive timer:\s+`, line.TrimmedLine); v != "" {
+			result.KeepaliveTimer = &v
+		}
+		if v := matchPrefix(`^Send hold timer:\s+`, line.TrimmedLine); v != "" {
+			result.SendHoldTimer = &v
 		}
 	}
 
