@@ -125,13 +125,87 @@ type ChannelRouteChangesStat struct {
 	ExportWithdraws *ChannelRouteChangesStatEntry `json:"export_withdraws,omitempty"`
 }
 
+type BGPCapabilitiesInfo []string
+
+type ChannelInfo struct {
+	Name             string                   `json:"name"`
+	State            string                   `json:"state"`
+	Preference       *int                     `json:"preference,omitempty"`
+	InputFilter      string                   `json:"input_filter"`
+	OutputFilter     string                   `json:"output_filter"`
+	RoutesStat       *ChannelRoutesStat       `json:"routes_stat,omitempty"`
+	RouteChangesStat *ChannelRouteChangesStat `json:"route_changes_stat,omitempty"`
+	BGPNextHop       *string                  `json:"bgp_next_hop,omitempty"`
+}
+
+type BGPProtoBasics struct {
+	Name  string `json:"name"`
+	Proto string `json:"proto"`
+	Table string `json:"table"`
+	State string `json:"state"`
+	Since string `json:"since"`
+	Info  string `json:"info"`
+}
+
 type BGPProtoInfo struct {
-	Channels map[string]ChannelInfo `json:"channels"`
+	Basics               *BGPProtoBasics        `json:"basics,omitempty"`
+	LocalCapabilities    BGPCapabilitiesInfo    `json:"local_capabilities,omitempty"`
+	NeighborCapabilities BGPCapabilitiesInfo    `json:"neighbor_capabilities,omitempty"`
+	Channels             map[string]ChannelInfo `json:"channels"`
+}
+
+func parseBGPProtoBasics(line string) *BGPProtoBasics {
+	result := new(BGPProtoBasics)
+	cells := make([]string, 0)
+	for _, cell := range strings.Split(line, " ") {
+		c := strings.TrimSpace(cell)
+		if c == "" {
+			continue
+		}
+		cells = append(cells, c)
+	}
+	if len(cells) > 0 {
+		result.Name = cells[0]
+	}
+	if len(cells) > 1 {
+		result.Proto = cells[1]
+	}
+	if len(cells) > 2 {
+		result.Table = cells[2]
+	}
+	if len(cells) > 3 {
+		result.State = cells[3]
+	}
+	if len(cells) > 4 {
+		result.Since = cells[4]
+	}
+	if len(cells) > 5 {
+		result.Info = cells[5]
+	}
+	return result
 }
 
 func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
 	result := new(BGPProtoInfo)
 	result.Channels = make(map[string]ChannelInfo)
+
+	summaryTabPattern := regexp.MustCompile(`Name\s+Proto\s+Table\s+State\s+Since\s+Info`)
+	if summaryTabPattern.MatchString(lines[0].TrimmedLine) && len(lines) > 1 {
+		basics := parseBGPProtoBasics(lines[1].TrimmedLine)
+		if basics != nil {
+			result.Basics = basics
+		}
+	}
+
+	if lineIdx := findLineIdx(lines, `^Local capabilities`); lineIdx >= 0 {
+		localCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
+		result.LocalCapabilities = localCapabilities
+	}
+	if lineIdx := findLineIdx(lines, `^Neighbor capabilities`); lineIdx >= 0 {
+		neighborCapabilities := parseBGPCapabilitiesInfo(lines[lineIdx:])
+		result.NeighborCapabilities = neighborCapabilities
+	}
+
 	if lineIdx := findLineIdx(lines, `^Channel ipv6`); lineIdx >= 0 {
 		channelInfo := parseChannel(lines[lineIdx : lineIdx+13])
 		if channelInfo != nil {
@@ -144,18 +218,8 @@ func parseBGPProtoInfo(lines []Line) *BGPProtoInfo {
 			result.Channels[channelInfo.Name] = *channelInfo
 		}
 	}
-	return result
-}
 
-type ChannelInfo struct {
-	Name             string                   `json:"name"`
-	State            string                   `json:"state"`
-	Preference       *int                     `json:"preference,omitempty"`
-	InputFilter      string                   `json:"input_filter"`
-	OutputFilter     string                   `json:"output_filter"`
-	RoutesStat       *ChannelRoutesStat       `json:"routes_stat,omitempty"`
-	RouteChangesStat *ChannelRouteChangesStat `json:"route_changes_stat,omitempty"`
-	BGPNextHop       *string                  `json:"bgp_next_hop,omitempty"`
+	return result
 }
 
 func parseRouteStats(line string) *ChannelRoutesStat {
@@ -264,6 +328,18 @@ func matchPrefix(prefixPattern string, line string) string {
 		return strings.TrimSpace(line[len(match0):])
 	}
 	return ""
+}
+
+func parseBGPCapabilitiesInfo(lines []Line) BGPCapabilitiesInfo {
+	result := make(BGPCapabilitiesInfo, 0)
+	for i := 1; i < len(lines); i++ {
+		if lines[i].Indent > lines[0].Indent {
+			result = append(result, lines[i].TrimmedLine)
+		} else {
+			break
+		}
+	}
+	return result
 }
 
 func parseChannel(lines []Line) *ChannelInfo {
